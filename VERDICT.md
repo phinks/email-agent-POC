@@ -21,16 +21,20 @@ the answer, won't drive the loop, or emits unparseable tool calls.
 **But we found what works.** Rather than let the model drive a tool loop, use it
 for ONE constrained call — turn the question into a small structured query — then
 let **deterministic code** resolve dates, search, count, and compose the answer.
-We built this (`MLX·Extract`) and it is **correct on every in-schema question
-(including the hardest), ~2× faster, and structurally unable to fabricate** (code
-writes the answer). Out-of-schema questions degrade *safely* (an honest "I can't
-answer that" rather than a confident lie). **And it runs on a 3B: Qwen 3B in
-extraction mode answered both the easy and the hard question correctly at
-~1.9 GB footprint — fits an 8 GB phone with no memory entitlement.** (Extraction
-doesn't itself save memory — footprint is the weights — but it makes a small,
-phone-friendly model sufficient, where the agentic loop needed a memory-tight 8B
-to even get close.) The model does what it's good at — understand the question;
-code does what must be reliable — decide, retrieve, count, answer.
+We built this (`MLX·Extract`) and it is **correct on the great majority of
+in-schema questions (including the hardest), ~2× faster, and structurally unable
+to fabricate the answer** (code writes it). Out-of-schema questions degrade
+*safely* (an honest "I can't answer that" rather than a confident lie). **And it
+runs on a 3B: Qwen 3B answers at ~1.9 GB — fits an 8 GB phone with no memory
+entitlement.** (Extraction doesn't itself save memory — footprint is the weights
+— but it makes a small, phone-friendly model sufficient, where the agentic loop
+needed a memory-tight 8B to even get close.) The one residual weakness is at the
+single extraction step: a small model occasionally hallucinates or drops a
+*query field* (the 3B more than the 7B), which code guards reduce but can't fully
+eliminate — the clean fix is constrained decoding or a fine-tuned extractor, not
+a bigger model. Even so, a bad extraction yields a wrong-but-honest "not found,"
+never a fabricated answer. The model understands the question; code decides,
+retrieves, counts, and answers.
 
 ## What the POC tested
 
@@ -475,31 +479,83 @@ do it — and a smaller model is the only real lever on memory (footprint is the
 weights). We tested the floor by running `MLX·Extract` on both the easy
 (Banana Republic) and hard (wine-count) questions:
 
-| Model | Extraction correct? | Footprint (`phys_footprint`) | Verdict |
+| Model | Extraction quality | Footprint (`phys_footprint`) | Phone fit |
 | --- | --- | --- | --- |
-| Qwen 0.5B | ✗ hallucinated `product=wine` on a Banana Republic question | ~0.5 GB | too weak |
-| **Qwen 3B** | **✓ correct on BOTH questions** (minor "last" timeframe glitch, degraded safely) | **~1.9 GB** | **sweet spot** |
-| Ministral 8B | ✓ correct on both | ~4.5 GB | works, memory-tight |
+| Qwen 0.5B | ✗ hallucinates badly (invented `product=wine` on a non-wine question) | ~0.5 GB | — too weak |
+| **Qwen 3B** | ✓ mostly correct; **occasional per-field hallucination** (`topic=wine`, `topic="Shack biscuit"`) | **~1.9 GB** | fits comfortably, no entitlement |
+| Qwen 7B | ✓ cleaner — harmless over-extraction (`topic=order`, stripped by a guard), no invented content observed | ~4.3 GB | tight; **needs entitlement**, 8 GB device |
+| Ministral 8B | ✓ clean | ~4.5 GB | tight; needs entitlement |
 
-**Qwen 3B in extraction mode is the answer:** correct on both the easy and the
-hard question, at **~1.9 GB** — comfortably within an 8 GB phone, **no memory
-entitlement needed**, ~7 s per answer, zero fabrication. The 0.5B is too weak
-(can't parse the question reliably); the 8B works but costs ~4.5 GB for no
-accuracy gain over the 3B here.
+**There is a real quality↔memory tradeoff at the extraction step** (see
+robustness, below). The 3B is cheap (~1.9 GB, fits any AI-class phone, no
+entitlement) and correct *most* of the time, but has a residual rate of
+hallucinated fields. The 7B/8B extract more cleanly but cost ~4.3–4.5 GB and
+need the increased-memory-limit entitlement on an 8 GB device. The 0.5B is too
+weak to use.
 
-**This resolves the memory concern.** The agentic loop needed an 8B to be even
-*close* to reliable (~4.5 GB, tight); extraction lets a **3B** do it correctly at
-**~1.9 GB**. The win isn't the mode saving memory — it's the mode making a
-smaller, cheaper, phone-friendly model sufficient.
+**This resolves the memory concern as far as it can be resolved by model
+choice:** the agentic loop needed a memory-tight 8B just to get *close* to
+reliable; extraction lets a **3B** (~1.9 GB) do the job correctly most of the
+time. The mode doesn't save memory directly — it makes a smaller model viable.
+Closing the 3B's residual error rate is the job of constrained decoding or a
+fine-tuned extractor (below), not a bigger model.
+
+### Extraction robustness: model proposes, code validates — and the limit of that
+
+The model's one job (question → structured query) is far easier than driving a
+loop, but it is **not perfect**, and the failures scale with model size. We
+hardened the pipeline with code guards, each prompted by an observed
+mis-extraction:
+
+- **topic-vs-sender correction** — a product word in `sender` → moved to `topic`.
+- **non-topic words** — `topic="orders"` (an intent word, not subject matter) → dropped.
+- **non-sender words** — `sender="store"` (generic placeholder) → dropped.
+- **intent validation** — `intent="reservation|updates"` (enum list echoed) → dropped.
+- **grounding** — `topic`/`sender` with no significant word present in the
+  question (pure hallucination, e.g. `topic=wine` on a Banana Republic question)
+  → dropped. The most principled guard: *the model may not filter on something
+  the user never said.*
+- **spelled-out numbers** — "last three months" normalized to "last 3 months".
+
+Two honest limits emerged:
+
+1. **String guards cannot catch *partial* hallucination.** The 3B produced
+   `topic="Shack biscuit"` — "Shack" is in the question so grounding passed it,
+   but "biscuit" was invented. Tightening to "all words must be grounded" would
+   wrongly drop legitimately reworded multi-word values. There is no clean
+   string rule here.
+2. **Dropped fields are unrecoverable.** When the model simply omits `intent`
+   (observed even on the 7B), no code can reconstruct a constraint the model
+   never emitted — e.g. a wine *promotion* then gets counted as a wine *order*.
+
+**Model-size comparison (identical questions).** On "What did I order from
+Shake Shack this year?" the **3B hallucinated** `topic="Shack biscuit"` (wrong
+answer) while the **7B extracted cleanly** (`topic=order`, harmlessly stripped →
+correct answer). So extraction quality is genuinely a function of model size:
+guards catch structural over-extraction for every model, but **only a stronger
+model (or constrained decoding) reduces hallucinated content.**
+
+**The production fix is not more guards.** The guard sequence demonstrably
+reduces errors but does not converge — each run can surface a new per-field
+quirk, and partial hallucination / dropped fields are out of reach of string
+rules. The right answer is **constrained / grammar-guided decoding** (force the
+model to emit only schema-valid values, ideally spans copied from the question —
+MLX supports guided generation) or a **fine-tuned extractor**. Either would let
+the cheap 3B extract reliably, collapsing the quality↔memory tradeoff.
 
 **Bottom line:** the agentic tool-loop approach fails across every model we
 tested (fabrication, stalls, won't-call, unparseable calls). The
-extraction + code-driven-execution approach **succeeds** — correct, faster, and
-structurally unable to fabricate (memory is unchanged — that's a function of
-model size, and extraction's role there is to make a smaller model viable). The
-model does what it is good at (understand the question); code does what must be
-reliable
-(decide, retrieve, count, answer).
+extraction + code-driven-execution approach **works** — correct on the great
+majority of questions, faster, and structurally unable to **fabricate the
+answer** (code composes it from the evidence). Its residual weakness is upstream,
+at the single extraction step: a small model occasionally mis-extracts or
+hallucinates a *query field*, which code guards reduce but cannot fully
+eliminate. That is a bounded, well-understood problem with a known fix
+(constrained decoding / fine-tuning), not the open-ended unreliability of the
+tool loop. The division of labor holds: the model understands the question;
+code decides, retrieves, counts, and answers — so the worst a bad extraction
+produces is a wrong-but-honest "not found," never an invented delivery or a
+fabricated email.
 
 ## Status
 

@@ -15,8 +15,8 @@ into one coherent-sounding order. And bigger is **not** monotonically better:
 the largest model tested (Qwen 14B) was among the *worst*, because it kept
 **narrating tool calls instead of making them** — proving tool-use and
 loop-following are *training* properties, not *scale* properties. Across every
-model the failures fall into three buckets — can't plan the query, can't confine
-the answer, or won't drive the loop. The path forward is the same regardless:
+model the failures fall into four buckets — can't plan the query, can't confine
+the answer, won't drive the loop, or emits unparseable tool calls. The path forward is the same regardless:
 move decision-making and retrieval out of the model into deterministic code, and
 constrain/verify even the final answer-synthesis step. The model should format
 verified evidence, not decide or act.
@@ -222,13 +222,37 @@ on-device with the memory entitlement, improved but still failed:
     14B being the worst at this — despite being the largest — is the clearest
     evidence that **tool-calling and loop-following are training properties, not
     scale properties.**
+12. **MLX 4-bit Llama 3.2 1B, tools** (the *smallest* model tested — the floor)
+    — a *fourth* failure mode, and partly a harness bug: the model **emitted raw
+    chat-template control tokens as answer text.** Its output was a stream of
+    `<|python_tag|>{…tool JSON…}<|eom_id|><|start_header_id|>assistant…`,
+    repeated for four malformed tool-call blocks, 364 tokens until it hit the
+    limit. It is *trying* to call tools, but (a) it loses control of the chat
+    template so the delimiters leak as text, and (b) our loop's tool-call parser
+    doesn't recognize Llama's `<|python_tag|>` format, so it detected **zero**
+    tool calls (`turn 1 final`) and captured the template garbage as the
+    "answer." The call *contents* are nonsense too: `intent` set to the literal
+    enum list `"any|purchase|promotion|reservation|updates"`, a hallucinated
+    `sender_domain: "banana republic.com"`, and `message_id: "order_id"` (a
+    placeholder, not a real id). This is pattern-matching the *shape* of tool
+    calls with zero understanding — the hard floor.
 
-Across runs, the failures split into three buckets: **can't plan the query**
+Across runs, the failures split into four buckets: **can't plan the query**
 (wrong tool/args), **can't confine the answer** (fabricates facts or
-relationships), and **won't drive the loop** (describes tool calls in prose —
-either never calling, or calling once then narrating the next step). Model
-*size* moves the first bucket somewhat; model *tool-tuning* governs the rest —
-the 14B was worse at the loop than the 7B.
+relationships), **won't drive the loop** (describes tool calls in prose — never
+calling, or calling once then narrating), and **emits unparseable calls** (raw
+template tokens / malformed JSON that the loop can't read, so they leak into the
+answer). The usable band is narrow and model-specific: the 1B floor emits
+garbage, the 14B ceiling won't emit calls at all, and only the mid-range
+(3B/7B, tool-tuned) produces *parseable* calls — which are then wrong or
+fabricated. Model *size* moves the planning bucket somewhat; model *tool-tuning*
+and chat-template fidelity govern the rest.
+
+> **Harness note:** the Llama 1B run also exposed that our tool-call parsing is
+> tied to the format MLX surfaces for Qwen-style calls and does not handle
+> Llama's `<|python_tag|>` convention. A production harness would need
+> format-aware parsing per model family — another argument for *not* making the
+> model responsible for the loop (see recommendation 1).
 
 Four 3B tool-enabled runs, four *different* query-planning / reasoning failures
 (fabricated operators → fabricated ship date → ineffective literal keywords →

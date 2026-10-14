@@ -543,6 +543,43 @@ model to emit only schema-valid values, ideally spans copied from the question �
 MLX supports guided generation) or a **fine-tuned extractor**. Either would let
 the cheap 3B extract reliably, collapsing the quality↔memory tradeoff.
 
+### Scaling to a real mailbox (hundreds / thousands of messages)
+
+The POC used 6 fake emails. A real mailbox has thousands. The architecture
+scales to that *better* than the tool loop, for a structural reason: **the
+model's workload is constant regardless of mailbox size.** The model only ever
+sees the question (one short string) and emits one short JSON query — it never
+ingests the mailbox. Extraction cost is fixed (~1 call, ~7 s) whether there are
+6 messages or 60,000. The *search* runs in code, where volume belongs.
+
+- **The tool loop would hit a wall here.** A broad search over hundreds of
+  emails produces a large result set; feeding it back into the model's context
+  overflows the window (Apple's on-device model is only ~4K tokens — which is
+  why the tool-path search already returns snippets, not bodies, and even that
+  wouldn't survive hundreds of hits). The agentic approach fails at scale on
+  *context capacity*, not just reliability. Extraction sidesteps this: the model
+  never sees the result set; code narrows thousands to a handful, and only a few
+  bodies are ever read (for content/delivery composition).
+
+- **Two code-side scaling needs (neither involves a bigger model):**
+  1. **An index for speed.** The current search is an `O(n)` linear scan — fine
+     to thousands, instant for hundreds. At serious scale you'd use what mail
+     clients already use (SQLite FTS / an inverted index). Standard engineering.
+  2. **Embeddings for retrieval quality — this is the real one.** The hand-built
+     category-keyword map (`wine → pinot/cabernet/…`) does not scale: you cannot
+     hand-map every topic a real mailbox contains, so the "no-keyword match"
+     problem (the 501 case) would recur constantly. The scalable fix is to embed
+     each message once on-device (incrementally as mail arrives) and make
+     "search" a vector-similarity query. That handles arbitrary topics and
+     semantics the keyword map can't, at any mailbox size.
+
+**Net:** at scale the dominant concern shifts from the model to **retrieval
+quality** — "did we surface the right 3 of 10,000?" — which is entirely a search
+-layer problem (embeddings + index), deterministic and well-understood. The
+model's role, and its cost, stay flat. If anything, a large mailbox makes the
+extraction architecture look *better* relative to the tool loop, whose context
+ceiling gets hit hard.
+
 **Bottom line:** the agentic tool-loop approach fails across every model we
 tested (fabrication, stalls, won't-call, unparseable calls). The
 extraction + code-driven-execution approach **works** — correct on the great

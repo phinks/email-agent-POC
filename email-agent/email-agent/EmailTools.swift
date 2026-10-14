@@ -164,14 +164,16 @@ nonisolated enum EmailTools {
         return kept.joined(separator: " ")
     }
 
-    private static func looksLikePurchase(_ e: FakeEmail) -> Bool {
+    // Exposed (not private) so the code-driven ExtractionPipeline can reuse the
+    // SAME purchase/promotion heuristics the tool path uses — one source of truth.
+    static func looksLikePurchase(_ e: FakeEmail) -> Bool {
         let s = "\(e.subject) \(e.body)".lowercased()
         return ["order", "confirmation", "receipt", "shipped", "shipment", "shipping",
                 "delivery", "club selection", "your case"].contains { s.contains($0) }
             && !looksLikePromotion(e)
     }
 
-    private static func looksLikePromotion(_ e: FakeEmail) -> Bool {
+    static func looksLikePromotion(_ e: FakeEmail) -> Bool {
         let s = "\(e.subject) \(e.body)".lowercased()
         return ["% off", "sale", "promotional", "unsubscribe", "offer", "deal"]
             .contains { s.contains($0) }

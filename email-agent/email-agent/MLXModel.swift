@@ -80,6 +80,17 @@ final class MLXModel: ModelProvider {
         var lastTokPerSec = 0.0
         let genStart = Perf.now()
 
+        // Loop-progress guard: remember the previous tool call's signature so we
+        // can detect a model that re-issues the IDENTICAL call without reacting
+        // to the result (observed: Mistral repeated the same search 4×; Ministral
+        // resolved the same date twice). On a repeat we inject a corrective nudge
+        // instead of silently spinning.
+        var lastCallSignature: String? = nil
+        func signature(_ name: String, _ args: [String: Any]) -> String {
+            let flat = args.keys.sorted().map { "\($0)=\(args[$0].map { "\($0)" } ?? "")" }
+            return name + "(" + flat.joined(separator: ",") + ")"
+        }
+
         for step in 1...maxSteps {
             let input = UserInput(chat: chat, tools: toolSchemas)
 
@@ -111,6 +122,10 @@ final class MLXModel: ModelProvider {
 
             // Native tool call (the format MLX recognizes, e.g. Qwen)?
             if let tc = turn.tool {
+                let args: [String: Any] = tc.function.arguments.reduce(into: [:]) {
+                    $0[$1.key] = "\($1.value)"
+                }
+                lastCallSignature = signature(tc.function.name, args)
                 trace(.modelTurn(step: step, madeToolCall: true))
                 let result = await MLXEmailTools.dispatch(tc, trace: trace)
                 chat.append(.assistant(turn.text))
@@ -124,10 +139,40 @@ final class MLXModel: ModelProvider {
             // <|python_tag|>, or bare JSON) that would otherwise leak into the
             // answer as text. Parse it so non-Qwen models get a fair shot.
             if let parsed = MLXEmailTools.parseToolCall(from: turn.text) {
+                let sig = signature(parsed.name, parsed.args)
+                // Loop-progress guard: identical call to last turn => don't spin.
+                if sig == lastCallSignature {
+                    trace(.modelTurn(step: step, madeToolCall: true))
+                    trace(.perf("repeat call suppressed: \(parsed.name)"))
+                    // Append BOTH the model's (repeated) turn as assistant AND the
+                    // nudge as user, so roles keep alternating — Mistral/Ministral's
+                    // template rejects two consecutive same-role messages.
+                    chat.append(.assistant("(repeated \(parsed.name) — suppressed)"))
+                    chat.append(.user(
+                        "You already called \(parsed.name) with the same arguments and "
+                        + "have its result above. Do NOT call it again. Use that result: "
+                        + "if the question needs more data, call a DIFFERENT tool "
+                        + "(e.g. search_email_structured with the resolved dates); "
+                        + "otherwise answer the question now from what you have. "
+                        + "Do not output a tool result as your final answer."))
+                    if step == maxSteps { finalText = turn.text }
+                    continue
+                }
+                lastCallSignature = sig
                 trace(.modelTurn(step: step, madeToolCall: true))
                 let result = await MLXEmailTools.dispatchParsed(parsed, trace: trace)
-                chat.append(.assistant(turn.text))
-                chat.append(.tool(result))
+                // Feed the turn back WITHOUT re-emitting a structured tool call.
+                // Mistral/Ministral's chat template validates that any tool call
+                // in history carries a 9-char alphanumeric id; our parsed calls
+                // have none, so re-rendering `.assistant(rawToolCallText)` +
+                // `.tool(...)` throws TemplateException. Instead, record the call
+                // and its result as plain assistant/user turns — the model still
+                // sees what it called and what came back, with no id to validate.
+                chat.append(.assistant("Called \(parsed.name). Result:\n\(result)"))
+                chat.append(.user("Continue using that result. If you have enough "
+                    + "information, answer the question now; otherwise call a "
+                    + "DIFFERENT tool. Do not repeat the same call, and do not "
+                    + "output a tool result verbatim as your answer."))
                 if step == maxSteps { finalText = turn.text }
                 continue
             }

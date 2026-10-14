@@ -23,6 +23,7 @@ struct ContentView: View {
     enum ProviderChoice: String, CaseIterable, Identifiable {
         case apple = "Apple"
         case mlx = "MLX"
+        case mlxExtract = "MLX·Extract"
         case mock = "Mock"
         var id: String { rawValue }
     }
@@ -57,18 +58,21 @@ struct ContentView: View {
     @State private var trace: [TraceLine] = []
     @State private var answer = ""
     @State private var running = false
-    @State private var choice: ProviderChoice = .apple
     /// Label of the model used for the most recent run (shown with the answer
     /// and included in the "Copy all" text, so pasted traces are unambiguous).
     @State private var modelLabel = ""
 
-    /// Selected MLX model id (defaults to the Qwen2.5 3B baseline we've used
-    /// throughout, not the first catalog row).
-    @State private var mlxModelID: String = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+    // --- persisted selections (restored on next launch) --------------------
+    // @AppStorage writes to UserDefaults so the last-chosen provider + MLX model
+    // are the defaults next time the app opens. ProviderChoice persists via its
+    // String rawValue (RawRepresentable).
+    @AppStorage("provider") private var choice: ProviderChoice = .apple
+    /// Selected MLX model id (defaults to the Qwen2.5 3B baseline).
+    @AppStorage("mlxModelID") private var mlxModelID = "mlx-community/Qwen2.5-3B-Instruct-4bit"
     /// True when the user picked "Custom…" and is typing an arbitrary id.
-    @State private var mlxCustom = false
+    @AppStorage("mlxCustom") private var mlxCustom = false
     /// The free-text custom id (used only when `mlxCustom` is true).
-    @State private var mlxCustomID = ""
+    @AppStorage("mlxCustomID") private var mlxCustomID = ""
 
     /// The effective MLX id, honoring the custom field when active.
     private var effectiveMLXID: String {
@@ -78,9 +82,10 @@ struct ContentView: View {
 
     private var provider: ModelProvider {
         switch choice {
-        case .apple:  return AppleFoundationModel()
-        case .mlx:    return MLXModel(modelID: effectiveMLXID)
-        case .mock:   return MockModel()
+        case .apple:       return AppleFoundationModel()
+        case .mlx:         return MLXModel(modelID: effectiveMLXID)
+        case .mlxExtract:  return MLXExtractionModel(modelID: effectiveMLXID)
+        case .mock:        return MockModel()
         }
     }
 
@@ -105,7 +110,7 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
 
-            if choice == .mlx { mlxModelPicker }
+            if choice == .mlx || choice == .mlxExtract { mlxModelPicker }
 
             Label(availabilityText,
                   systemImage: provider.isAvailable ? "checkmark.circle" : "xmark.circle")

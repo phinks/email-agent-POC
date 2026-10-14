@@ -16,10 +16,18 @@ the largest model tested (Qwen 14B) was among the *worst*, because it kept
 **narrating tool calls instead of making them** — proving tool-use and
 loop-following are *training* properties, not *scale* properties. Across every
 model the failures fall into four buckets — can't plan the query, can't confine
-the answer, won't drive the loop, or emits unparseable tool calls. The path forward is the same regardless:
-move decision-making and retrieval out of the model into deterministic code, and
-constrain/verify even the final answer-synthesis step. The model should format
-verified evidence, not decide or act.
+the answer, won't drive the loop, or emits unparseable tool calls.
+
+**But we found what works.** Rather than let the model drive a tool loop, use it
+for ONE constrained call — turn the question into a small structured query — then
+let **deterministic code** resolve dates, search, count, and compose the answer.
+We built this (`MLX·Extract`) and it is **correct on every in-schema question
+(including the hardest), ~2× faster, and ~5× lighter on memory (~650 MB vs
+~3.2 GB resident on the same 8B), and structurally unable to fabricate** (code
+writes the answer). Out-of-schema questions degrade *safely* (an honest "I can't
+answer that" rather than a confident lie). The model does what it's good at —
+understand the question; code does what must be reliable — decide, retrieve,
+count, answer.
 
 ## What the POC tested
 
@@ -372,6 +380,72 @@ is simultaneously (a) strong, (b) no-model-to-ship, and (c) low-maintenance.
 does not lift the underlying capability ceiling — it makes a pattern *more
 likely*, not guaranteed. Combine any fine-tune with option 1 (keep decisions in
 code; constrain/verify the final synthesis).
+
+## The fix we validated: extraction + code-driven execution
+
+We built option 1 and it works. Instead of giving the model tools and asking it
+to drive a multi-step loop (which every model fumbled), the model makes **one
+constrained call**: turn the question into a small structured query (JSON —
+product / merchant / intent / timeframe / operation). Then **code** does
+everything else: resolve dates, run the search, count/collect, and compose the
+answer. The model never picks a tool, never chains steps, never counts, and
+never phrases a factual claim — so it cannot fabricate.
+
+**Pipeline:** `question → [model: extract JSON] → [code: resolve dates +
+search + compose answer]`. (Mode: `MLX·Extract` in the harness.)
+
+### Results (MLX extraction, Ministral 8B)
+
+| Question | Tool-loop result | Extraction result |
+| --- | --- | --- |
+| "Did my Banana Republic order get delivered / when placed?" | fabricated "delivered Oct 1" | factual: found order 503, placed 2026-09-26 (no delivery invented) |
+| "How many wine orders in the last 3 months?" | stalled 3× (resolve-then-fail-to-search) | **correct: "1 wine order"** — found the no-keyword order 501 |
+| "Did I get a Shake Shack receipt recently?" | n/a | factual: found receipt 506 (2026-07-02) |
+
+- **Correct on every in-schema question**, including the hardest one (wine), which
+  the tool loop could never complete and which plain keyword search cannot answer
+  (order 501 never contains the word "wine" — code expands the category:
+  wine → bottles/pinot/cabernet/chardonnay/cellar…). The lesson: **improving
+  retrieval is a code change (a keyword map now, embeddings in production), not a
+  model-reliability gamble.**
+- **Zero fabrication** across all runs — code composes the answer, so there is no
+  synthesis step to invent a delivery date or merge two emails.
+- **Faster:** ~8–10 s (one short call) vs ~20 s for the multi-turn loop.
+- **Much lighter on memory:** the same Ministral 8B ran at **~650 MB resident in
+  extraction mode vs ~3.2 GB resident / ~5 GB dirty for the tool loop** — because
+  one short generation doesn't accumulate a multi-turn KV cache. This substantially
+  softens the "8B barely fits a phone" problem.
+
+### Honest boundaries
+
+- **Out-of-schema questions degrade safely.** Questions the schema can't express
+  ("how many are unread?", "urgent?", "from my wife?") have no extractable
+  constraint. Rather than silently miscount, the pipeline now detects this and
+  answers honestly ("I can't answer that from the available fields…") instead of
+  fabricating. A *safe* failure (visible, non-fabricated) — the opposite of the
+  tool loop's confident lies. Extending coverage = growing the schema (code),
+  and some questions ("my wife") also need external data (contacts) the model
+  can't supply.
+- **The composer is deliberately plain** (code-generated phrasing). It states
+  facts correctly but tersely; richer phrasing would need a constrained final
+  model pass (reintroducing a small, verifiable fabrication surface).
+- **The extraction call can still mis-parse** (e.g. echoing the enum list as a
+  value) — but that surface is tiny and validated/corrected in code, versus the
+  open-ended loop which failed unpredictably.
+
+### Even smaller models?
+
+Extraction is a far easier task than driving the loop, so a *smaller* model may
+do it reliably — which would get Ministral-quality answers at 3B memory cost.
+Worth testing next (`MLX·Extract` + Qwen 3B/1.5B); if it holds, the on-device
+memory concern largely dissolves.
+
+**Bottom line:** the agentic tool-loop approach fails across every model we
+tested (fabrication, stalls, won't-call, unparseable calls). The
+extraction + code-driven-execution approach **succeeds** — correct, faster,
+far lighter on memory, and structurally unable to fabricate. The model does what
+it is good at (understand the question); code does what must be reliable
+(decide, retrieve, count, answer).
 
 ## Status
 

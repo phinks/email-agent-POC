@@ -1,5 +1,20 @@
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
+
+/// Copy text to the system clipboard. Cross-platform: UIKit on iOS, AppKit on
+/// macOS.
+private func copyToClipboard(_ text: String) {
+    #if canImport(UIKit)
+    UIPasteboard.general.string = text
+    #elseif canImport(AppKit)
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
+    #endif
+}
 
 /// Minimal harness: pick a model provider, ask a question (or tap a sample),
 /// run the agent, and watch the tool-call trace + final answer on screen.
@@ -7,10 +22,35 @@ import UIKit
 struct ContentView: View {
     enum ProviderChoice: String, CaseIterable, Identifiable {
         case apple = "Apple"
-        case mlx = "MLX 3B"
-        case mlx7b = "MLX 7B"
+        case mlx = "MLX"
         case mock = "Mock"
         var id: String { rawValue }
+    }
+
+    /// Curated MLX model ids (all under the `mlx-community` HuggingFace org, so
+    /// they download on first use). The list is just a convenience — any valid
+    /// MLX-compatible id works via the "Custom…" option. Verified to resolve on
+    /// HuggingFace at time of writing; a bad/offline id fails at download time.
+    struct MLXCatalog {
+        static let models: [(label: String, id: String)] = [
+            // Small end — fast, tiny, likely weaker (the "where's the floor" curve).
+            ("Qwen2.5 0.5B (4-bit)", "mlx-community/Qwen2.5-0.5B-Instruct-4bit"),
+            ("Llama 3.2 1B (4-bit)", "mlx-community/Llama-3.2-1B-Instruct-4bit"),
+            ("Qwen2.5 1.5B (4-bit)", "mlx-community/Qwen2.5-1.5B-Instruct-4bit"),
+            // ~2–3B — the main phone-viable comparison class.
+            ("Gemma 2 2B (4-bit)",   "mlx-community/gemma-2-2b-it-4bit"),
+            ("Qwen2.5 3B (4-bit)",   "mlx-community/Qwen2.5-3B-Instruct-4bit"),
+            ("Llama 3.2 3B (4-bit)", "mlx-community/Llama-3.2-3B-Instruct-4bit"),
+            ("Phi-3.5 mini (4-bit)", "mlx-community/Phi-3.5-mini-instruct-4bit"),
+            // ~7–8B — phone-marginal (needs the memory entitlement).
+            ("Qwen2.5 7B (4-bit)",   "mlx-community/Qwen2.5-7B-Instruct-4bit"),
+            ("Mistral 7B v0.3 (4-bit)", "mlx-community/Mistral-7B-Instruct-v0.3-4bit"),
+            ("Ministral 8B · tool-tuned (4-bit)", "mlx-community/Ministral-8B-Instruct-2410-4bit"),
+            ("Llama 3.1 8B (4-bit)", "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"),
+            // Large — Mac only (won't fit a phone even with the entitlement).
+            ("Qwen2.5 14B · Mac only (4-bit)", "mlx-community/Qwen2.5-14B-Instruct-4bit"),
+        ]
+        static let customLabel = "Custom…"
     }
 
     @State private var question = ""
@@ -19,11 +59,24 @@ struct ContentView: View {
     @State private var running = false
     @State private var choice: ProviderChoice = .apple
 
+    /// Selected MLX model id (defaults to the Qwen2.5 3B baseline we've used
+    /// throughout, not the first catalog row).
+    @State private var mlxModelID: String = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+    /// True when the user picked "Custom…" and is typing an arbitrary id.
+    @State private var mlxCustom = false
+    /// The free-text custom id (used only when `mlxCustom` is true).
+    @State private var mlxCustomID = ""
+
+    /// The effective MLX id, honoring the custom field when active.
+    private var effectiveMLXID: String {
+        let custom = mlxCustomID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (mlxCustom && !custom.isEmpty) ? custom : mlxModelID
+    }
+
     private var provider: ModelProvider {
         switch choice {
         case .apple:  return AppleFoundationModel()
-        case .mlx:    return MLXModel()
-        case .mlx7b:  return MLXModel(modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit")
+        case .mlx:    return MLXModel(modelID: effectiveMLXID)
         case .mock:   return MockModel()
         }
     }
@@ -48,10 +101,56 @@ struct ContentView: View {
                 ForEach(ProviderChoice.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
+
+            if choice == .mlx { mlxModelPicker }
+
             Label(availabilityText,
                   systemImage: provider.isAvailable ? "checkmark.circle" : "xmark.circle")
                 .font(.caption)
                 .foregroundStyle(provider.isAvailable ? .green : .red)
+        }
+    }
+
+    /// Dropdown of curated MLX models plus a "Custom…" free-text option.
+    /// The chosen id is downloaded by MLX on first run (see the trace's
+    /// "downloading" line).
+    private var mlxModelPicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("MLX model").font(.caption).foregroundStyle(.secondary)
+                Menu {
+                    ForEach(MLXCatalog.models, id: \.id) { model in
+                        Button(model.label) {
+                            mlxModelID = model.id
+                            mlxCustom = false
+                        }
+                    }
+                    Divider()
+                    Button(MLXCatalog.customLabel) { mlxCustom = true }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(mlxCustom
+                             ? MLXCatalog.customLabel
+                             : (MLXCatalog.models.first { $0.id == mlxModelID }?.label ?? mlxModelID))
+                        Image(systemName: "chevron.up.chevron.down").font(.caption2)
+                    }
+                }
+                .disabled(running)
+            }
+            if mlxCustom {
+                TextField("mlx-community/Your-Model-4bit", text: $mlxCustomID)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.caption, design: .monospaced))
+                    .disabled(running)
+                    #if os(iOS)
+                    .autocorrectionDisabled(true)
+                    .textInputAutocapitalization(.never)
+                    #endif
+            }
+            Text(effectiveMLXID)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
         }
     }
 
@@ -95,7 +194,7 @@ struct ContentView: View {
                     HStack {
                         Text("ANSWER").font(.caption).bold()
                         Spacer()
-                        Button("Copy all") { UIPasteboard.general.string = plainText }
+                        Button("Copy all") { copyToClipboard(plainText) }
                             .font(.caption2).buttonStyle(.bordered)
                     }
                     Text(answer).padding(8)
@@ -125,10 +224,21 @@ struct ContentView: View {
         running = true; trace = []; answer = ""
         let agent = Agent(model: provider)
         let result = await agent.answer(q) { event in
-            Task { @MainActor in trace.append(TraceLine(event)) }
+            Task { @MainActor in appendTrace(TraceLine(event)) }
         }
         answer = result
         running = false
+    }
+
+    /// Append a trace line — but collapse consecutive download-progress updates
+    /// onto a single line (so "downloading 1%..2%..100%" doesn't flood the log).
+    @MainActor
+    private func appendTrace(_ line: TraceLine) {
+        if line.isDownloadProgress, let last = trace.last, last.isDownloadProgress {
+            trace[trace.count - 1] = line     // overwrite the previous % in place
+        } else {
+            trace.append(line)
+        }
     }
 }
 
@@ -137,8 +247,12 @@ struct TraceLine: Identifiable {
     let id = UUID()
     let text: String
     let color: Color
+    /// True for the "downloading X%" progress ticks, so the UI can collapse a
+    /// run of them onto one updating line instead of one line per percent.
+    let isDownloadProgress: Bool
 
     init(_ event: TraceEvent) {
+        var isDownload = false
         switch event {
         case .prompt(_, let question):
             text = "▶ question: \(question)"; color = .primary
@@ -154,6 +268,8 @@ struct TraceLine: Identifiable {
             text = "⚠ aborted: \(reason)"; color = .orange
         case .perf(let summary):
             text = "⏱ \(summary)"; color = .purple
+            isDownload = summary.hasPrefix("downloading")
         }
+        isDownloadProgress = isDownload
     }
 }

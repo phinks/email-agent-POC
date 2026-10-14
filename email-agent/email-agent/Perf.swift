@@ -20,11 +20,34 @@ enum Perf {
         return Double(info.resident_size) / (1024 * 1024)
     }
 
-    /// Memory iOS will still grant this app before jetsam, in MB (iOS 13+).
-    /// A small/negative headroom while a model is resident is the warning sign
-    /// that a larger model (e.g. 7B) will be killed.
+    /// Memory still available to this app before it is killed, in MB.
+    ///
+    /// iOS: the headroom iOS will grant before jetsam (`os_proc_available_memory`,
+    /// iOS 13+). A small/negative value while a model is resident is the warning
+    /// sign that a larger model (e.g. 7B) will be killed.
+    ///
+    /// macOS: there is no per-app jetsam limit, so "headroom before jetsam" is
+    /// not a meaningful number. We report free physical RAM instead as a rough
+    /// analog (the Mac is not memory-constrained the way the phone is).
     static func availableMemoryMB() -> Double {
-        Double(os_proc_available_memory()) / (1024 * 1024)
+        #if os(iOS)
+        return Double(os_proc_available_memory()) / (1024 * 1024)
+        #else
+        // macOS: approximate "available" as free + inactive physical pages.
+        var stats = vm_statistics64()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size
+        )
+        let kr = withUnsafeMutablePointer(to: &stats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return -1 }
+        let pageSize = Double(vm_kernel_page_size)
+        let freeBytes = (Double(stats.free_count) + Double(stats.inactive_count)) * pageSize
+        return freeBytes / (1024 * 1024)
+        #endif
     }
 
     /// Monotonic seconds, for timing load/generation.

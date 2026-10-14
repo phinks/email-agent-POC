@@ -22,6 +22,7 @@ private func copyToClipboard(_ text: String) {
 struct ContentView: View {
     enum ProviderChoice: String, CaseIterable, Identifiable {
         case apple = "Apple"
+        case appleExtract = "Apple·Extract"
         case mlx = "MLX"
         case mlxExtract = "MLX·Extract"
         case mock = "Mock"
@@ -84,10 +85,11 @@ struct ContentView: View {
 
     private var provider: ModelProvider {
         switch choice {
-        case .apple:       return AppleFoundationModel()
-        case .mlx:         return MLXModel(modelID: effectiveMLXID)
-        case .mlxExtract:  return MLXExtractionModel(modelID: effectiveMLXID)
-        case .mock:        return MockModel()
+        case .apple:         return AppleFoundationModel()
+        case .appleExtract:  return AppleExtractionModel()
+        case .mlx:           return MLXModel(modelID: effectiveMLXID)
+        case .mlxExtract:    return MLXExtractionModel(modelID: effectiveMLXID)
+        case .mock:          return MockModel()
         }
     }
 

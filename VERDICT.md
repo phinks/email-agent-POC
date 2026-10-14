@@ -36,6 +36,18 @@ a bigger model. Even so, a bad extraction yields a wrong-but-honest "not found,"
 never a fabricated answer. The model understands the question; code decides,
 retrieves, counts, and answers.
 
+**The strongest result: Apple's built-in model + `@Generable` constrained
+extraction.** The model that was *worst* at the agentic tool loop (fabrication,
+inconsistency) becomes a *clean extractor* when (a) it only extracts and (b)
+Apple's `@Generable` constrains the output to a valid schema. On-device, correct
+across our test questions, **~50 MB app footprint** (the model ships with the OS
+— nothing to bundle or download) and **~2 s** per answer — vs ~1.9–4.3 GB and
+~7 s for bundled MLX models. This is the constrained-decoding "real fix", native
+and free on the Apple path. Caveat: `@Generable` guarantees *structure*, not
+*semantics* — it still occasionally emits a plausible-but-invented value (e.g.
+`sender="WineStore"`), which the code grounding guard catches. Both layers are
+load-bearing. (Apple-Intelligence devices only: iPhone 15 Pro and newer.)
+
 ## What the POC tested
 
 A throwaway SwiftUI app running the same agent design as the Python POC
@@ -564,6 +576,56 @@ produce a field the examples/heuristics don't cover. Closing that last gap to a
 schema-valid values, ideally spans copied from the question — MLX supports
 guided generation) or a **fine-tuned extractor**. But for the tested question
 set, the cheap 3B now extracts reliably.
+
+### Constrained decoding, realized: Apple `@Generable` (the best result)
+
+We implemented the recommended "real fix" on the Apple path, where it is native
+and free: an `Apple·Extract` provider that asks Foundation Models to generate a
+`@Generable` query type. Foundation Models masks the decode so the output is
+**guaranteed schema-valid** — no malformed JSON, no enum-list echo, no missing
+required field. (The MLX equivalent, XGrammar via `mlx-swift-lm`, would require a
+C++/package integration we scoped but did not build in a throwaway POC.)
+
+**The inversion.** The Apple built-in model was the *worst* at the agentic tool
+loop (fabricated "delivered Oct 1", invented date windows, inconsistent across
+identical questions). As a *constrained extractor* it is **the best option
+tested**:
+
+| Metric | Apple·Extract (`@Generable`) |
+| --- | --- |
+| App-side footprint | **~50 MB** (model ships with the OS — nothing to bundle/download) |
+| Latency | **~1.8–2.3 s** (no model load/download) |
+| Correctness | correct across the test set, including the fabrication money-shot |
+| Fabrication | none (code composes the answer) |
+
+Four representative `Apple·Extract` runs, all correct:
+- **Banana Republic "delivered?"** — the exact question the Apple *tool loop*
+  fabricated ("delivered Oct 1") now answers honestly: "…dated 2026-09-26. No
+  delivery confirmation on file — only an estimated delivery around Oct 1." Same
+  model, opposite outcome.
+- **"how many wine orders in the last 3 months"** → correct count (1).
+- **Semantic hallucination caught:** the model emitted `sender="WineStore"`
+  (plausible, invented, *not* in the question). `@Generable` allowed it (it is
+  structurally valid); the **code grounding guard dropped it** → correct answer.
+- **Two extraction errors, four guards, right answer:** on "receipt from Shake
+  Shack recently", the model mis-set `topic=receipt` and `intent=lookup`; code
+  guards dropped both, inferred `intent=purchase`, resolved "recently" → correct
+  "none recently."
+
+**Key nuance (don't oversell `@Generable`).** Constrained decoding guarantees
+*structure*, not *semantics*. It eliminates the format failures (invalid JSON,
+enum echo, dropped required field) but a model can still emit a
+plausible-but-wrong value in a valid field (the `WineStore` case). So **both
+layers are load-bearing**: constrained decoding for structure, code guards
+(grounding, intent inference, denull) for semantics. The combination — not
+either alone — is what produced correct answers across the set.
+
+**Recommendation.** For Apple-Intelligence devices (iPhone 15 Pro and newer),
+**Apple Foundation Models + `@Generable` constrained extraction + code-driven
+execution** is the strongest on-device design: ~50 MB app footprint, ~2 s, no
+model to ship, no fabrication. For broader device coverage, the MLX 3B +
+few-shot path (~1.9 GB) is the fallback; its production hardening is the same
+constrained-decoding idea via XGrammar.
 
 ### Scaling to a real mailbox (hundreds / thousands of messages)
 

@@ -51,6 +51,21 @@ nonisolated enum ExtractionPipeline {
                     trace: @escaping @Sendable (TraceEvent) -> Void) async -> String {
         var q = raw
 
+        // Normalize literal "null"/"none" strings to nil. @Generable (and some
+        // model outputs) sometimes fill an optional with the STRING "null"
+        // instead of leaving it absent — which would otherwise leak into a
+        // search filter. Treat these placeholder strings as empty.
+        func denull(_ s: String?) -> String? {
+            guard let v = s?.trimmingCharacters(in: .whitespaces) else { return nil }
+            let junk: Set<String> = ["null", "none", "n/a", "nil", ""]
+            return junk.contains(v.lowercased()) ? nil : v
+        }
+        q.topic = denull(q.topic)
+        q.sender = denull(q.sender)
+        q.intent = denull(q.intent)
+        q.timeframe = denull(q.timeframe)
+        q.operation = denull(q.operation)
+
         // Fix topic-as-sender: "sender: wine" -> "topic: wine".
         if let s = q.sender?.lowercased(), topicWords.contains(s) {
             q.topic = q.topic ?? s

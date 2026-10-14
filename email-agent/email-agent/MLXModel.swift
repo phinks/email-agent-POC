@@ -108,17 +108,34 @@ final class MLXModel: ModelProvider {
 
             outputTokens += turn.tokens
             lastTokPerSec = turn.tps
-            trace(.modelTurn(step: step, madeToolCall: turn.tool != nil))
 
-            guard let tc = turn.tool else {
-                finalText = turn.text          // no tool call => final answer
-                break
+            // Native tool call (the format MLX recognizes, e.g. Qwen)?
+            if let tc = turn.tool {
+                trace(.modelTurn(step: step, madeToolCall: true))
+                let result = await MLXEmailTools.dispatch(tc, trace: trace)
+                chat.append(.assistant(turn.text))
+                chat.append(.tool(result))
+                if step == maxSteps { finalText = turn.text }
+                continue
             }
 
-            let result = await MLXEmailTools.dispatch(tc, trace: trace)
-            chat.append(.assistant(turn.text))
-            chat.append(.tool(result))
-            if step == maxSteps { finalText = turn.text }   // ran out of steps
+            // Fallback: MLX didn't surface a tool call, but the model may have
+            // emitted one in its own format (Mistral [TOOL_CALLS], Llama
+            // <|python_tag|>, or bare JSON) that would otherwise leak into the
+            // answer as text. Parse it so non-Qwen models get a fair shot.
+            if let parsed = MLXEmailTools.parseToolCall(from: turn.text) {
+                trace(.modelTurn(step: step, madeToolCall: true))
+                let result = await MLXEmailTools.dispatchParsed(parsed, trace: trace)
+                chat.append(.assistant(turn.text))
+                chat.append(.tool(result))
+                if step == maxSteps { finalText = turn.text }
+                continue
+            }
+
+            // Genuinely no tool call in any known format => final answer.
+            trace(.modelTurn(step: step, madeToolCall: false))
+            finalText = turn.text
+            break
         }
 
         let genMs = (Perf.now() - genStart) * 1000

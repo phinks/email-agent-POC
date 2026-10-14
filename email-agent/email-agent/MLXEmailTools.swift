@@ -159,6 +159,108 @@ enum MLXEmailTools {
         return s
     }
 
+    // MARK: fallback — parse tool calls MLX's own parser did not recognize
+    //
+    // MLX surfaces a structured `.toolCall` only for the format it knows (the
+    // Qwen-style path). Other families emit valid-but-different conventions that
+    // otherwise leak into the answer as raw text:
+    //   Mistral:  [TOOL_CALLS][{"name": "...", "arguments": {...}}]
+    //   Llama 3:  <|python_tag|>{"name": "...", "parameters": {...}}<|eom_id|>
+    //   bare:     {"name": "...", "arguments": {...}}
+    // We detect and parse these so non-Qwen models get a fair shot at the loop.
+
+    struct ParsedCall { let name: String; let args: [String: Any] }
+
+    /// Try to extract the FIRST tool call from a model's raw output text,
+    /// across the Mistral / Llama / bare-JSON formats. Returns nil if none.
+    static func parseToolCall(from raw: String) -> ParsedCall? {
+        var text = raw
+
+        // Strip Llama special tokens so the JSON object underneath is clean.
+        for token in ["<|python_tag|>", "<|eom_id|>", "<|eot_id|>",
+                      "<|start_header_id|>", "<|end_header_id|>", "assistant"] {
+            text = text.replacingOccurrences(of: token, with: " ")
+        }
+        // Strip Mistral's [TOOL_CALLS] prefix (keeps the following array/object).
+        text = text.replacingOccurrences(of: "[TOOL_CALLS]", with: " ")
+
+        // Find the first balanced {...} object.
+        guard let objRange = firstJSONObjectRange(in: text) else { return nil }
+        let objString = String(text[objRange])
+
+        // Decode leniently. Mistral (via this template) emits Python-repr style
+        // with SINGLE quotes — {'name': 'x', 'arguments': {...}} — which is not
+        // valid JSON. Try strict JSON first; if that fails, retry with single
+        // quotes normalized to double quotes (safe here: tool-call keys/values
+        // are short identifiers with no apostrophes).
+        func decode(_ str: String) -> [String: Any]? {
+            guard let data = str.data(using: .utf8) else { return nil }
+            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }
+        guard let obj = decode(objString)
+                ?? decode(objString.replacingOccurrences(of: "'", with: "\""))
+        else { return nil }
+
+        // Accept {name, arguments} or {name, parameters}.
+        guard let name = obj["name"] as? String else { return nil }
+        let argsAny = (obj["arguments"] as? [String: Any])
+            ?? (obj["parameters"] as? [String: Any])
+            ?? [:]
+        // Normalize string-encoded numbers (models often quote limit, etc.).
+        return ParsedCall(name: name, args: argsAny)
+    }
+
+    /// Index range of the first balanced top-level JSON object in `s`.
+    private static func firstJSONObjectRange(in s: String) -> Range<String.Index>? {
+        guard let start = s.firstIndex(of: "{") else { return nil }
+        var depth = 0
+        var inString = false
+        var escaped = false
+        var i = start
+        while i < s.endIndex {
+            let c = s[i]
+            if inString {
+                if escaped { escaped = false }
+                else if c == "\\" { escaped = true }
+                else if c == "\"" { inString = false }
+            } else {
+                if c == "\"" { inString = true }
+                else if c == "{" { depth += 1 }
+                else if c == "}" {
+                    depth -= 1
+                    if depth == 0 { return start..<s.index(after: i) }
+                }
+            }
+            i = s.index(after: i)
+        }
+        return nil
+    }
+
+    /// Dispatch a tool call parsed from raw text (bypasses MLX's ToolCall type,
+    /// which we cannot synthesize). Mirrors `dispatch`'s behavior and tracing.
+    static func dispatchParsed(_ call: ParsedCall,
+                               trace: @escaping @Sendable (TraceEvent) -> Void) async -> String {
+        let out = await callEmailTool(normalizedName(call.name), coerce(call.args))
+        trace(.toolCall(name: call.name, arguments: call.args,
+                        resultChars: out.count, isError: out.hasPrefix("TOOL_ERROR")))
+        return out
+    }
+
+    /// Some models prefix/namespace the tool name; keep only a known tool.
+    private static func normalizedName(_ name: String) -> String {
+        let known = ["resolve_relative_date", "search_email_structured",
+                     "search_email", "get_message"]
+        return known.first { name.hasSuffix($0) } ?? name
+    }
+
+    /// Coerce string-encoded scalars (e.g. "limit": "10") into usable types,
+    /// since the downstream EmailTools closures expect Int for limit.
+    private static func coerce(_ args: [String: Any]) -> [String: Any] {
+        var out = args
+        if let l = out["limit"] as? String, let n = Int(l) { out["limit"] = n }
+        return out
+    }
+
     // MARK: shared bridge to the EmailTools closures (single source of logic)
 
     private static func callEmailTool(_ name: String, _ args: [String: Any]) async -> String {

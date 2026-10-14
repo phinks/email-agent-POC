@@ -20,6 +20,26 @@ enum Perf {
         return Double(info.resident_size) / (1024 * 1024)
     }
 
+    /// Physical memory footprint of this process, in MB — the `phys_footprint`
+    /// field from `task_vm_info`. This is the number Xcode's memory gauge and
+    /// Instruments report, and it is the one jetsam/App-Store limits key off of.
+    /// Unlike `resident_size`, it is STABLE run-to-run and counts dirty +
+    /// compressed memory (not just whatever mmap'd pages happen to be faulted in
+    /// at sample time), so it is the honest figure for "how much is this using".
+    static func physFootprintMB() -> Double {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size
+        )
+        let kr = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return -1 }
+        return Double(info.phys_footprint) / (1024 * 1024)
+    }
+
     /// Memory still available to this app before it is killed, in MB.
     ///
     /// iOS: the headroom iOS will grant before jetsam (`os_proc_available_memory`,
@@ -63,15 +83,16 @@ struct PerfSample {
     var promptTokens: Int = 0
     var outputTokens: Int = 0
     var decodeTokPerSec: Double = 0    // output tokens / generation time
-    var residentMB: Double = 0         // peak-ish resident while answering
+    var footprintMB: Double = 0        // phys_footprint (Xcode-gauge number)
+    var residentMB: Double = 0         // raw resident_size (noisy; mmap-dependent)
     var availableMB: Double = 0        // headroom before jetsam at that point
 
     var summary: String {
         String(
             format: "load %.0fms · total %.0fms · %d→%d tok · %.1f tok/s · "
-                  + "res %.0fMB · headroom %.0fMB",
+                  + "footprint %.0fMB · headroom %.0fMB",
             modelLoadMs, totalMs, promptTokens, outputTokens,
-            decodeTokPerSec, residentMB, availableMB
+            decodeTokPerSec, footprintMB, availableMB
         )
     }
 }

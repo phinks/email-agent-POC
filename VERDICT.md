@@ -22,12 +22,15 @@ the answer, won't drive the loop, or emits unparseable tool calls.
 for ONE constrained call — turn the question into a small structured query — then
 let **deterministic code** resolve dates, search, count, and compose the answer.
 We built this (`MLX·Extract`) and it is **correct on every in-schema question
-(including the hardest), ~2× faster, and ~5× lighter on memory (~650 MB vs
-~3.2 GB resident on the same 8B), and structurally unable to fabricate** (code
+(including the hardest), ~2× faster, and structurally unable to fabricate** (code
 writes the answer). Out-of-schema questions degrade *safely* (an honest "I can't
-answer that" rather than a confident lie). The model does what it's good at —
-understand the question; code does what must be reliable — decide, retrieve,
-count, answer.
+answer that" rather than a confident lie). **And it runs on a 3B: Qwen 3B in
+extraction mode answered both the easy and the hard question correctly at
+~1.9 GB footprint — fits an 8 GB phone with no memory entitlement.** (Extraction
+doesn't itself save memory — footprint is the weights — but it makes a small,
+phone-friendly model sufficient, where the agentic loop needed a memory-tight 8B
+to even get close.) The model does what it's good at — understand the question;
+code does what must be reliable — decide, retrieve, count, answer.
 
 ## What the POC tested
 
@@ -411,10 +414,17 @@ search + compose answer]`. (Mode: `MLX·Extract` in the harness.)
 - **Zero fabrication** across all runs — code composes the answer, so there is no
   synthesis step to invent a delivery date or merge two emails.
 - **Faster:** ~8–10 s (one short call) vs ~20 s for the multi-turn loop.
-- **Much lighter on memory:** the same Ministral 8B ran at **~650 MB resident in
-  extraction mode vs ~3.2 GB resident / ~5 GB dirty for the tool loop** — because
-  one short generation doesn't accumulate a multi-turn KV cache. This substantially
-  softens the "8B barely fits a phone" problem.
+- **Memory is NOT improved by extraction** (correction). An early reading
+  suggested extraction used far less memory, but that was an artifact of
+  `resident_size`, which is noisy and undercounts mmap'd weights. Measured by
+  **`phys_footprint`** (the Xcode-gauge / jetsam metric), the same Ministral 8B
+  is **~4.4–4.6 GB in extraction mode** — essentially the same as the tool loop,
+  because footprint is dominated by the ~4.5 GB of model weights, not by the KV
+  cache that differs between modes. **The lever for memory is model SIZE, not
+  mode.** Extraction's value is reliability + speed; its *indirect* memory win is
+  that it makes a smaller model viable (extraction is an easy task), so a 3B in
+  extraction mode (~1.5–2 GB) is the path to actually cutting footprint — worth
+  testing next.
 
 ### Honest boundaries
 
@@ -426,25 +436,69 @@ search + compose answer]`. (Mode: `MLX·Extract` in the harness.)
   tool loop's confident lies. Extending coverage = growing the schema (code),
   and some questions ("my wife") also need external data (contacts) the model
   can't supply.
-- **The composer is deliberately plain** (code-generated phrasing). It states
-  facts correctly but tersely; richer phrasing would need a constrained final
-  model pass (reintroducing a small, verifiable fabrication surface).
+- **The composer handles the common shapes in code** — counts, yes/no lookups,
+  dates, relative/calendar timeframes ("last 3 months", "recently", "this year"),
+  and **delivery/shipping status read honestly from the body** (distinguishing
+  *estimated* from *confirmed* delivery, *shipped* from *delivered*). It does
+  **not** yet compose rich free-form content answers ("what exactly did I
+  order?" lists only metadata, not line items) — that is a bounded follow-up and
+  the one place a *tightly constrained* final model pass could help, at a small
+  verifiable fabrication cost.
 - **The extraction call can still mis-parse** (e.g. echoing the enum list as a
-  value) — but that surface is tiny and validated/corrected in code, versus the
-  open-ended loop which failed unpredictably.
+  value, or tagging "what did I order" as a count) — but that surface is tiny and
+  validated/corrected in code, versus the open-ended loop which failed
+  unpredictably.
 
-### Even smaller models?
+### The money shot: same question, tool loop vs extraction
 
-Extraction is a far easier task than driving the loop, so a *smaller* model may
-do it reliably — which would get Ministral-quality answers at 3B memory cost.
-Worth testing next (`MLX·Extract` + Qwen 3B/1.5B); if it holds, the on-device
-memory concern largely dissolves.
+The clearest single piece of evidence — identical question
+("Has my Banana Republic order been delivered, and when was it placed?"):
+
+> **Tool loop (Ministral 8B):** "Your Banana Republic order was **delivered on
+> October 1, 2026**." — *fabricated*: 503 only states an **estimated** delivery
+> of Oct 1 and no confirmation; the model upgraded estimate → confirmed.
+>
+> **Extraction + code (Qwen 3B):** "Yes — Banana Republic order #1S43XF4, dated
+> 2026-09-26. **No delivery confirmation on file — the email only gives an
+> estimated delivery around October 1.**" — *honest*: states the placed date,
+> reports the estimate as an estimate, and explicitly flags that delivery is not
+> confirmed.
+
+Same question. The tool loop invented a delivery that never happened; the
+extraction path cannot, because code — not the model — composes the answer from
+only what the body supports. This runs on a **3B at ~1.9 GB**.
+
+### How small can the model be? (the memory floor — tested)
+
+Extraction is a far easier task than driving the loop, so a *smaller* model can
+do it — and a smaller model is the only real lever on memory (footprint is the
+weights). We tested the floor by running `MLX·Extract` on both the easy
+(Banana Republic) and hard (wine-count) questions:
+
+| Model | Extraction correct? | Footprint (`phys_footprint`) | Verdict |
+| --- | --- | --- | --- |
+| Qwen 0.5B | ✗ hallucinated `product=wine` on a Banana Republic question | ~0.5 GB | too weak |
+| **Qwen 3B** | **✓ correct on BOTH questions** (minor "last" timeframe glitch, degraded safely) | **~1.9 GB** | **sweet spot** |
+| Ministral 8B | ✓ correct on both | ~4.5 GB | works, memory-tight |
+
+**Qwen 3B in extraction mode is the answer:** correct on both the easy and the
+hard question, at **~1.9 GB** — comfortably within an 8 GB phone, **no memory
+entitlement needed**, ~7 s per answer, zero fabrication. The 0.5B is too weak
+(can't parse the question reliably); the 8B works but costs ~4.5 GB for no
+accuracy gain over the 3B here.
+
+**This resolves the memory concern.** The agentic loop needed an 8B to be even
+*close* to reliable (~4.5 GB, tight); extraction lets a **3B** do it correctly at
+**~1.9 GB**. The win isn't the mode saving memory — it's the mode making a
+smaller, cheaper, phone-friendly model sufficient.
 
 **Bottom line:** the agentic tool-loop approach fails across every model we
 tested (fabrication, stalls, won't-call, unparseable calls). The
-extraction + code-driven-execution approach **succeeds** — correct, faster,
-far lighter on memory, and structurally unable to fabricate. The model does what
-it is good at (understand the question); code does what must be reliable
+extraction + code-driven-execution approach **succeeds** — correct, faster, and
+structurally unable to fabricate (memory is unchanged — that's a function of
+model size, and extraction's role there is to make a smaller model viable). The
+model does what it is good at (understand the question); code does what must be
+reliable
 (decide, retrieve, count, answer).
 
 ## Status

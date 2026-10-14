@@ -63,7 +63,7 @@ final class MLXModel: ModelProvider {
             trace(.perf("downloading \(Int(progress.fractionCompleted * 100))%"))
         }
         let loadMs = (Perf.now() - loadStart) * 1000
-        trace(.perf("loaded: \(Int(loadMs))ms · res \(Int(Perf.residentMemoryMB()))MB · "
+        trace(.perf("loaded: \(Int(loadMs))ms · footprint \(Int(Perf.physFootprintMB()))MB · "
                     + "headroom \(Int(Perf.availableMemoryMB()))MB"))
 
         // --- 2. Search-driven tool loop -------------------------------------
@@ -193,6 +193,7 @@ final class MLXModel: ModelProvider {
         perf.decodeTokPerSec = lastTokPerSec > 0
             ? lastTokPerSec
             : (genMs > 0 ? Double(outputTokens) / (genMs / 1000) : 0)
+        perf.footprintMB = Perf.physFootprintMB()
         perf.residentMB = Perf.residentMemoryMB()
         perf.availableMB = Perf.availableMemoryMB()
         trace(.perf(perf.summary))

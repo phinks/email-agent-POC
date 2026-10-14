@@ -52,7 +52,7 @@ final class MLXExtractionModel: ModelProvider {
             trace(.perf("downloading \(Int(progress.fractionCompleted * 100))%"))
         }
         let loadMs = (Perf.now() - loadStart) * 1000
-        trace(.perf("loaded: \(Int(loadMs))ms · res \(Int(Perf.residentMemoryMB()))MB · "
+        trace(.perf("loaded: \(Int(loadMs))ms · footprint \(Int(Perf.physFootprintMB()))MB · "
                     + "headroom \(Int(Perf.availableMemoryMB()))MB"))
 
         // --- ONE generation: question -> JSON query -------------------------
@@ -84,12 +84,12 @@ final class MLXExtractionModel: ModelProvider {
             trace(.finalAnswer("Could not understand the question well enough to search."))
             return "Could not understand the question well enough to search."
         }
-        trace(.perf("extracted: product=\(query.product ?? "-") merchant=\(query.merchant ?? "-") "
+        trace(.perf("extracted: topic=\(query.topic ?? "-") sender=\(query.sender ?? "-") "
                     + "intent=\(query.intent ?? "-") timeframe=\(query.timeframe ?? "-") "
                     + "op=\(query.operation ?? "lookup")"))
 
         // --- CODE runs the search + composes the answer ---------------------
-        let answer = await ExtractionPipeline.run(query, trace: trace)
+        let answer = await ExtractionPipeline.run(query, question: question, trace: trace)
 
         var perf = PerfSample()
         perf.modelLoadMs = loadMs
@@ -98,6 +98,7 @@ final class MLXExtractionModel: ModelProvider {
         perf.decodeTokPerSec = turn.tps > 0
             ? turn.tps
             : (genMs > 0 ? Double(turn.tokens) / (genMs / 1000) : 0)
+        perf.footprintMB = Perf.physFootprintMB()
         perf.residentMB = Perf.residentMemoryMB()
         perf.availableMB = Perf.availableMemoryMB()
         trace(.perf(perf.summary))

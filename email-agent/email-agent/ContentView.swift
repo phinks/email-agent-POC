@@ -54,7 +54,9 @@ struct ContentView: View {
         static let customLabel = "Custom…"
     }
 
-    @State private var question = ""
+    /// The question text, persisted so the last question is restored on next
+    /// launch (prefilled in the field, ready to re-run or edit).
+    @AppStorage("lastQuestion") private var question = ""
     @State private var trace: [TraceLine] = []
     @State private var answer = ""
     @State private var running = false

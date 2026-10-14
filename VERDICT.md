@@ -9,12 +9,17 @@ wall), **but 7B runs ~4× slower (~7 tok/s, ~2 min per answer).** On reliability
 the headline holds and sharpens: **no model we tested reliably drives the loop.**
 The ~3B models (Apple 2-bit, MLX 4-bit) fabricate facts, mis-select evidence,
 invent search constraints, and ignore guardrails — consistently. The 7B is
-clearly better: it finally finds the hard adversarial email and drops the crude
-mistakes — **yet it still fabricates**, now by fusing two unrelated emails into
-one coherent-sounding order. The failure gets *subtler* as the model grows,
-which makes it harder to catch, not easier. The path forward is to move
-decision-making out of the model into deterministic code, and constrain/verify
-even the final answer-synthesis step.
+clearly better at *reasoning*: it finds the hard adversarial email and drops the
+crude mistakes — **yet it still fabricates**, now by fusing two unrelated emails
+into one coherent-sounding order. And bigger is **not** monotonically better:
+the largest model tested (Qwen 14B) was among the *worst*, because it kept
+**narrating tool calls instead of making them** — proving tool-use and
+loop-following are *training* properties, not *scale* properties. Across every
+model the failures fall into three buckets — can't plan the query, can't confine
+the answer, or won't drive the loop. The path forward is the same regardless:
+move decision-making and retrieval out of the model into deterministic code, and
+constrain/verify even the final answer-synthesis step. The model should format
+verified evidence, not decide or act.
 
 ## What the POC tested
 
@@ -25,9 +30,15 @@ mailbox** (to isolate *model* viability from mail plumbing). Tools:
 `get_message`. Pluggable model behind a `ModelProvider` protocol:
 
 - **Apple** — Foundation Models (built-in ~3B, 2-bit), in-process tool calling.
-- **MLX** — a larger on-device model via MLX Swift (`Qwen2.5-3B-Instruct-4bit`),
-  real tool-calling loop.
+- **MLX** — on-device models via MLX Swift, real tool-calling loop. A model
+  dropdown selects any of ~13 curated `mlx-community` models (0.5B → 14B) or a
+  custom HuggingFace id, downloaded on first use.
 - **Mock** — scripted, for plumbing checks.
+
+Runs on both a physical **iPhone** (the viability target) and a native **macOS**
+build (for iterating on reliability and running larger models — 8B/14B — that a
+phone can't hold). Mac results speak to model *reliability* (device-independent),
+not phone *viability*.
 
 The fake mailbox includes an adversarial case: a real wine-club shipment whose
 subject says "Slurpers shipment" (no keyword "wine"), a wine *promotion* that is
@@ -175,6 +186,44 @@ on-device with the memory entitlement, improved but still failed:
    as relevant. Better retrieval, subtler failure: instead of inventing a fact
    outright it fabricated a *relationship* between real emails — still wrong,
    still confident.
+10. **MLX 4-bit Mistral 7B v0.3, tools** ("How many wine orders in the last 3
+    years?") — a *new* failure mode: it **didn't call any tool at all.** Instead
+    of invoking `search_email_structured`, it wrote the user a prose tutorial on
+    *how to* call it, including a JSON snippet with `merchant: "wine"`
+    (product-as-merchant again) and nonsense dates (`after 2018-01-01, before
+    2021-01-01` — 5–8 years ago, ignoring the pre-computed windows). One turn,
+    `final`, zero tool calls. The lesson: **tool-calling is model-specific, not
+    just size-specific.** Mistral 7B v0.3 is a capable model but is not tuned for
+    the structured function-calling convention, so it treats the tools as
+    documentation to describe rather than functions to invoke — whereas the
+    similarly-sized Qwen 7B (run 9) called them fine. (This is why Mistral's
+    function-calling-tuned **Ministral 8B** is the one worth testing next.)
+11. **MLX 4-bit Qwen2.5 14B, tools** (the *largest* model tested, run on the Mac
+    target) — size did **not** buy tool-loop reliability; it was among the worst.
+    Two runs, same failure class — the model *narrates* tool calls instead of
+    making them:
+    - "Did I get a receipt from Shake Shack recently?" → one turn, `final`, **zero
+      tool calls**, 14 tokens: "I will check for any receipts from Shake Shack in
+      the last week." It announced intent and stopped.
+    - "How many wine orders in the last three months?" → it *did* call
+      `resolve_relative_date` correctly (turn 1), got the bounds, then on turn 2
+      said "Now that I have the correct date range, I will use
+      search_email_structured…" and **stopped** — narrating the next step instead
+      of taking it. It proved it *can* call a tool but **cannot sustain the
+      loop**: it bails to prose at the point the second call should happen.
+
+    The agent loop treats "no tool call this turn" as "final answer," so the
+    narration gets captured as the answer and the loop ends one step short. The
+    14B being the worst at this — despite being the largest — is the clearest
+    evidence that **tool-calling and loop-following are training properties, not
+    scale properties.**
+
+Across runs, the failures split into three buckets: **can't plan the query**
+(wrong tool/args), **can't confine the answer** (fabricates facts or
+relationships), and **won't drive the loop** (describes tool calls in prose —
+either never calling, or calling once then narrating the next step). Model
+*size* moves the first bucket somewhat; model *tool-tuning* governs the rest —
+the 14B was worse at the loop than the 7B.
 
 Four 3B tool-enabled runs, four *different* query-planning / reasoning failures
 (fabricated operators → fabricated ship date → ineffective literal keywords →

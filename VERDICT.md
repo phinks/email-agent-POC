@@ -482,14 +482,15 @@ weights). We tested the floor by running `MLX·Extract` on both the easy
 | Model | Extraction quality | Footprint (`phys_footprint`) | Phone fit |
 | --- | --- | --- | --- |
 | Qwen 0.5B | ✗ hallucinates badly (invented `product=wine` on a non-wine question) | ~0.5 GB | — too weak |
-| **Qwen 3B** | ✓ mostly correct; **occasional per-field hallucination** (`topic=wine`, `topic="Shack biscuit"`) | **~1.9 GB** | fits comfortably, no entitlement |
+| **Qwen 3B** | ✓ hallucinated with a rules-only prompt (`topic=wine`, `"Shack biscuit"`); **clean with few-shot** (see robustness) | **~1.9 GB** | fits comfortably, no entitlement |
 | Qwen 7B | ✓ cleaner — harmless over-extraction (`topic=order`, stripped by a guard), no invented content observed | ~4.3 GB | tight; **needs entitlement**, 8 GB device |
 | Ministral 8B | ✓ clean | ~4.5 GB | tight; needs entitlement |
 
-**There is a real quality↔memory tradeoff at the extraction step** (see
-robustness, below). The 3B is cheap (~1.9 GB, fits any AI-class phone, no
-entitlement) and correct *most* of the time, but has a residual rate of
-hallucinated fields. The 7B/8B extract more cleanly but cost ~4.3–4.5 GB and
+**There was a quality↔memory tradeoff at the extraction step — largely closed by
+few-shot prompting** (see robustness, below). With an abstract-rules prompt the
+3B hallucinated fields more than the 7B/8B; with few-shot examples the 3B
+extracts cleanly on the tested questions at ~1.9 GB (fits any AI-class phone, no
+entitlement). The 7B/8B are still a touch more robust but cost ~4.3–4.5 GB and
 need the increased-memory-limit entitlement on an 8 GB device. The 0.5B is too
 weak to use.
 
@@ -503,7 +504,9 @@ fine-tuned extractor (below), not a bigger model.
 ### Extraction robustness: model proposes, code validates — and the limit of that
 
 The model's one job (question → structured query) is far easier than driving a
-loop, but it is **not perfect**, and the failures scale with model size. We
+loop, but it is **not perfect**. With a rules-only prompt the error rate scaled
+with model size (the 3B hallucinated fields more than the 7B); **few-shot
+prompting largely closed that gap** (see "What actually fixed it" below). We also
 hardened the pipeline with code guards, each prompted by an observed
 mis-extraction:
 
@@ -528,20 +531,39 @@ Two honest limits emerged:
    (observed even on the 7B), no code can reconstruct a constraint the model
    never emitted — e.g. a wine *promotion* then gets counted as a wine *order*.
 
-**Model-size comparison (identical questions).** On "What did I order from
-Shake Shack this year?" the **3B hallucinated** `topic="Shack biscuit"` (wrong
-answer) while the **7B extracted cleanly** (`topic=order`, harmlessly stripped →
-correct answer). So extraction quality is genuinely a function of model size:
-guards catch structural over-extraction for every model, but **only a stronger
-model (or constrained decoding) reduces hallucinated content.**
+**Model-size comparison (with a RULES-ONLY prompt).** Initially, on "What did I
+order from Shake Shack this year?" the **3B hallucinated** `topic="Shack
+biscuit"` (wrong answer) while the **7B extracted cleanly**. With an
+abstract-rules prompt, extraction quality was clearly a function of model size.
 
-**The production fix is not more guards.** The guard sequence demonstrably
-reduces errors but does not converge — each run can surface a new per-field
-quirk, and partial hallucination / dropped fields are out of reach of string
-rules. The right answer is **constrained / grammar-guided decoding** (force the
-model to emit only schema-valid values, ideally spans copied from the question —
-MLX supports guided generation) or a **fine-tuned extractor**. Either would let
-the cheap 3B extract reliably, collapsing the quality↔memory tradeoff.
+**What actually fixed it: few-shot prompting (the key result).** We rewrote the
+extraction prompt with ~5 worked examples covering the exact failure shapes —
+including a question with no topic → `topic:null`, "what did I order from X" →
+`topic:null` (not an invented product), and an out-of-schema question → all
+nulls. Small models follow examples far better than rules, and the effect was
+decisive: **the 3B's topic/sender hallucination largely disappeared.** The same
+questions that previously produced `topic="Shack biscuit"` / `topic=wine` now
+extract cleanly (`topic:null`, correct sender) on the 3B — matching the 7B's
+cleanliness **at ~1.9 GB instead of ~4.3 GB**. Few-shot was the single
+highest-value change to the extractor, at zero memory cost.
+
+**Two bounded code inferences mop up the residue** (both principled, like the
+spelled-out-number fix, not open-ended guards):
+- **spelled-out numbers** — "last three months" → "last 3 months".
+- **intent from order words** — few-shot cut hallucination but the model still
+  sometimes *omits* `intent`; if it's unset and the question says
+  "order(ed)/bought/receipt", code infers `intent=purchase` (so a wine
+  *promotion* is no longer miscounted as a wine *order*).
+
+**Updated conclusion.** Few-shot + these inferences bring the **3B to near-7B
+extraction reliability at ~1.9 GB** — which strengthens the "3B is the sweet
+spot" case and softens the earlier quality↔memory tradeoff. What remains is a
+*residual*, not a systematic gap: a sufficiently novel phrasing can still
+produce a field the examples/heuristics don't cover. Closing that last gap to a
+*guarantee* is the job of **constrained / grammar-guided decoding** (emit only
+schema-valid values, ideally spans copied from the question — MLX supports
+guided generation) or a **fine-tuned extractor**. But for the tested question
+set, the cheap 3B now extracts reliably.
 
 ### Scaling to a real mailbox (hundreds / thousands of messages)
 

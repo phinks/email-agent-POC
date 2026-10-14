@@ -135,9 +135,27 @@ nonisolated enum ExtractionPipeline {
         // Validate the extracted intent: models sometimes echo the enum option
         // list ("reservation|updates") as the value. Keep only a single valid enum.
         let validIntents: Set<String> = ["any", "purchase", "promotion", "reservation", "updates"]
-        let intent: String? = q.intent.flatMap { validIntents.contains($0) ? $0 : nil }
+        var intent: String? = q.intent.flatMap { validIntents.contains($0) ? $0 : nil }
         if q.intent != nil && intent == nil {
             trace(.perf("dropped malformed intent '\(q.intent!)'"))
+        }
+
+        // Infer intent=purchase from order words when the model dropped it.
+        // Few-shot cut hallucination but the model still sometimes OMITS intent
+        // (observed: "who have I ordered wine from" → intent null → a wine
+        // *promotion* then counted as an order). If intent is unset but the
+        // question clearly concerns a purchase ("order(ed)", "bought",
+        // "receipt", "purchase(d)"), set it. Bounded + principled, like the
+        // spelled-out-number normalization — "ordered" genuinely implies purchase.
+        if intent == nil || intent == "any" {
+            let ql = question.lowercased()
+            let orderWords = ["order", "ordered", "bought", "buy", "purchase",
+                              "purchased", "receipt", "receipts", "delivered",
+                              "delivery", "shipped", "shipment"]
+            if orderWords.contains(where: { ql.contains($0) }) {
+                intent = "purchase"
+                trace(.perf("inferred intent=purchase from the question's order words"))
+            }
         }
 
         // Out-of-schema guard. If the question extracted NO usable constraint
@@ -470,27 +488,52 @@ nonisolated enum ExtractionPipeline {
         }
     }
 
-    /// The extraction prompt: ask the model for ONLY the JSON query, nothing else.
+    /// The extraction prompt. Few-shot: worked examples teach the small model
+    /// the behaviors that abstract rules alone did not enforce — set a field to
+    /// null when the question does not mention it (do NOT invent a topic/sender),
+    /// map order/receipt words to intent (not topic), and pick the right
+    /// operation. Examples are chosen to cover the exact failure modes observed
+    /// (invented topic, "ordered"→topic, generic sender, spelled-out numbers).
     static func extractionPrompt(for question: String) -> String {
         """
         You convert a user's email question into a JSON query. Output ONLY the \
-        JSON object, no prose, no explanation.
+        JSON object, no prose, no explanation. Every value must come from the \
+        question; if the question does not mention a field, set it to null. \
+        NEVER invent a sender or topic the user did not say.
 
-        Rules:
-        - "sender" is WHO the email is from — a store, brand, person, or service \
-        (e.g. "Banana Republic"). It is who sent it, NOT what it is about.
-        - "topic" is WHAT the email is about (e.g. "wine", "travel", "invoice"). \
-        It is the subject matter, NOT who sent it.
-        - "timeframe" is the raw relative phrase from the question (e.g. "last 3 \
-        months"), or null if none is mentioned.
-        - "operation": "count" if the user asks "how many"; "list" if they ask \
-        "what", "which", or "show me" (they want the contents/items, not a tally); \
-        otherwise "lookup" (a yes/no "did I get…?").
+        Field meanings:
+        - "sender": WHO the email is from — a specific store, brand, person, or \
+        service named in the question (e.g. "Banana Republic"). null if none named. \
+        Never a generic word like "store" or "shop".
+        - "topic": WHAT the email is about — a product or subject (e.g. "wine", \
+        "travel"). null if the question names no subject. Words like "order", \
+        "receipt", "email" are NOT topics (they describe intent, not subject).
+        - "intent": any|purchase|promotion|reservation|updates. Orders/receipts/\
+        shipping/deliveries are "purchase".
+        - "timeframe": the raw time phrase from the question ("last 3 months", \
+        "this year", "recently"), or null if none.
+        - "operation": "count" for "how many"; "list" for "what/which/show me" \
+        (wants contents); "lookup" for yes/no ("did I get…?").
 
         Schema: \(ExtractedQuery.schemaHint)
 
-        Question: \(question)
-        JSON:
+        Examples:
+        Q: How many wine orders have I placed in the last three months?
+        {"topic":"wine","sender":null,"intent":"purchase","timeframe":"last three months","operation":"count"}
+
+        Q: Has my Banana Republic order been delivered, and when was it placed?
+        {"topic":null,"sender":"Banana Republic","intent":"purchase","timeframe":null,"operation":"lookup"}
+
+        Q: What did I order from Shake Shack this year?
+        {"topic":null,"sender":"Shake Shack","intent":"purchase","timeframe":"this year","operation":"list"}
+
+        Q: Did I get a receipt from Shake Shack recently?
+        {"topic":null,"sender":"Shake Shack","intent":"purchase","timeframe":"recently","operation":"lookup"}
+
+        Q: How many emails are unread?
+        {"topic":null,"sender":null,"intent":null,"timeframe":null,"operation":"count"}
+
+        Q: \(question)
         """
     }
 }

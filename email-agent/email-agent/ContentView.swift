@@ -58,6 +58,9 @@ struct ContentView: View {
     @State private var answer = ""
     @State private var running = false
     @State private var choice: ProviderChoice = .apple
+    /// Label of the model used for the most recent run (shown with the answer
+    /// and included in the "Copy all" text, so pasted traces are unambiguous).
+    @State private var modelLabel = ""
 
     /// Selected MLX model id (defaults to the Qwen2.5 3B baseline we've used
     /// throughout, not the first catalog row).
@@ -214,7 +217,9 @@ struct ContentView: View {
 
     /// The whole run (answer + trace) as plain text, for the Copy button.
     private var plainText: String {
-        var out = "ANSWER:\n\(answer)\n\nTRACE:\n"
+        var out = ""
+        if !modelLabel.isEmpty { out += "MODEL: \(modelLabel)\n\n" }
+        out += "ANSWER:\n\(answer)\n\nTRACE:\n"
         out += trace.map(\.text).joined(separator: "\n")
         return out
     }
@@ -222,7 +227,10 @@ struct ContentView: View {
     @MainActor
     private func run(_ q: String) async {
         running = true; trace = []; answer = ""
-        let agent = Agent(model: provider)
+        let selected = provider                 // capture once (stable label)
+        modelLabel = selected.label
+        trace.append(TraceLine(model: selected.label))   // self-identify the run
+        let agent = Agent(model: selected)
         let result = await agent.answer(q) { event in
             Task { @MainActor in appendTrace(TraceLine(event)) }
         }
@@ -250,6 +258,13 @@ struct TraceLine: Identifiable {
     /// True for the "downloading X%" progress ticks, so the UI can collapse a
     /// run of them onto one updating line instead of one line per percent.
     let isDownloadProgress: Bool
+
+    /// A plain header line naming the model used for the run.
+    init(model label: String) {
+        text = "🧠 model: \(label)"
+        color = .indigo
+        isDownloadProgress = false
+    }
 
     init(_ event: TraceEvent) {
         var isDownload = false

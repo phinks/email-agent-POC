@@ -200,11 +200,16 @@ on-device with the memory entitlement, improved but still failed:
     function-calling-tuned **Ministral 8B** is the one worth testing next.)
 11. **MLX 4-bit Qwen2.5 14B, tools** (the *largest* model tested, run on the Mac
     target) — size did **not** buy tool-loop reliability; it was among the worst.
-    Two runs, same failure class — the model *narrates* tool calls instead of
-    making them:
+    Observed across **three distinct questions**, same failure class every time —
+    the model *narrates* tool calls instead of making them (consistent, not a
+    fluke):
     - "Did I get a receipt from Shake Shack recently?" → one turn, `final`, **zero
       tool calls**, 14 tokens: "I will check for any receipts from Shake Shack in
       the last week." It announced intent and stopped.
+    - "Has my Banana Republic order been delivered, and when was it placed?" →
+      again one turn, `final`, **zero tool calls**, 28 tokens: "I will check your
+      Banana Republic order status… First, I'll search for emails…" — narrated and
+      stopped.
     - "How many wine orders in the last three months?" → it *did* call
       `resolve_relative_date` correctly (turn 1), got the bounds, then on turn 2
       said "Now that I have the correct date range, I will use
